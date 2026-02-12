@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -123,25 +124,6 @@ func chiselDownloadURL() string {
 	)
 }
 
-// addWindowsDefenderExclusion adds the .archbox directory to Windows Defender's
-// exclusion list so that chisel (a tunneling tool often flagged as a false positive)
-// can be downloaded and extracted without being quarantined.
-func addWindowsDefenderExclusion() {
-	dir := filepath.Dir(binDir()) // ~/.archbox
-	// This requires elevated privileges; if it fails we continue anyway and
-	// let the user know they may need to whitelist manually.
-	ps := fmt.Sprintf(`Add-MpPreference -ExclusionPath '%s'`, dir)
-	cmd := exec.Command("powershell", "-Command",
-		fmt.Sprintf(`Start-Process powershell -Verb RunAs -Wait -ArgumentList '-Command %s'`, ps))
-	if out, err := cmd.CombinedOutput(); err != nil {
-		fmt.Println("  Warning: could not add Windows Defender exclusion automatically.")
-		fmt.Printf("  You may need to manually exclude: %s\n", dir)
-		fmt.Printf("  (%s: %v)\n", strings.TrimSpace(string(out)), err)
-	} else {
-		fmt.Printf("  Added Defender exclusion for %s\n", dir)
-	}
-}
-
 func installChisel() error {
 	// Check if chisel already exists AND is a reasonable size (>100KB).
 	// A corrupted or quarantined file may exist but be tiny/empty.
@@ -152,33 +134,35 @@ func installChisel() error {
 	os.Remove(chiselPath())
 	fmt.Println("[1/2] Installing chisel tunnel...")
 
-	// On Windows, whitelist the install directory with Defender first
-	if runtime.GOOS == "windows" {
-		fmt.Println("  Requesting Defender exclusion (you may see a UAC prompt)...")
-		addWindowsDefenderExclusion()
-	}
-
-	gzPath := chiselPath() + ".gz"
-	if err := downloadFile(chiselDownloadURL(), gzPath); err != nil {
+	fmt.Println("  Downloading and extracting chisel...")
+	resp, err := http.Get(chiselDownloadURL())
+	if err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
-	fmt.Println("  Extracting...")
-	var cmd *exec.Cmd
-	if runtime.GOOS == "windows" {
-		ps := fmt.Sprintf(
-			`$i=[System.IO.File]::OpenRead('%s');`+
-				`$g=New-Object System.IO.Compression.GZipStream($i,[System.IO.Compression.CompressionMode]::Decompress);`+
-				`$o=[System.IO.File]::Create('%s');`+
-				`$g.CopyTo($o);$o.Close();$g.Close();$i.Close()`,
-			gzPath, chiselPath())
-		cmd = exec.Command("powershell", "-Command", ps)
-	} else {
-		cmd = exec.Command("gzip", "-d", "-f", gzPath)
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("download: HTTP %d", resp.StatusCode)
 	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("extract: %s: %w", string(out), err)
+
+	// Decompress gzip stream in-process — no temp .gz file on disk,
+	// so Windows Defender can't quarantine the archive mid-extraction.
+	gz, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		return fmt.Errorf("gzip: %w", err)
 	}
-	os.Remove(gzPath)
+	defer gz.Close()
+
+	os.MkdirAll(filepath.Dir(chiselPath()), 0755)
+	out, err := os.Create(chiselPath())
+	if err != nil {
+		return fmt.Errorf("create: %w", err)
+	}
+	if _, err := io.Copy(out, gz); err != nil {
+		out.Close()
+		os.Remove(chiselPath())
+		return fmt.Errorf("extract: %w", err)
+	}
+	out.Close()
 	os.Chmod(chiselPath(), 0755)
 	fmt.Println("  Done.")
 	return nil

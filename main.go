@@ -123,11 +123,37 @@ func chiselDownloadURL() string {
 	)
 }
 
+// addWindowsDefenderExclusion adds the .archbox directory to Windows Defender's
+// exclusion list so that chisel (a tunneling tool often flagged as a false positive)
+// can be downloaded and extracted without being quarantined.
+func addWindowsDefenderExclusion() {
+	dir := filepath.Dir(binDir()) // ~/.archbox
+	// This requires elevated privileges; if it fails we continue anyway and
+	// let the user know they may need to whitelist manually.
+	ps := fmt.Sprintf(`Add-MpPreference -ExclusionPath '%s'`, dir)
+	cmd := exec.Command("powershell", "-Command",
+		fmt.Sprintf(`Start-Process powershell -Verb RunAs -Wait -ArgumentList '-Command %s'`, ps))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		fmt.Println("  Warning: could not add Windows Defender exclusion automatically.")
+		fmt.Printf("  You may need to manually exclude: %s\n", dir)
+		fmt.Printf("  (%s: %v)\n", strings.TrimSpace(string(out)), err)
+	} else {
+		fmt.Printf("  Added Defender exclusion for %s\n", dir)
+	}
+}
+
 func installChisel() error {
 	if _, err := os.Stat(chiselPath()); err == nil {
 		return nil
 	}
 	fmt.Println("[1/2] Installing chisel tunnel...")
+
+	// On Windows, whitelist the install directory with Defender first
+	if runtime.GOOS == "windows" {
+		fmt.Println("  Requesting Defender exclusion (you may see a UAC prompt)...")
+		addWindowsDefenderExclusion()
+	}
+
 	gzPath := chiselPath() + ".gz"
 	if err := downloadFile(chiselDownloadURL(), gzPath); err != nil {
 		return fmt.Errorf("download: %w", err)

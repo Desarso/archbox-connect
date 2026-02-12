@@ -125,30 +125,42 @@ func chiselDownloadURL() string {
 }
 
 // addDefenderExclusion adds the .archbox directory to Windows Defender's
-// exclusion list. This pops up a standard UAC "Allow this app to make changes?"
-// dialog. The user just clicks Yes and it proceeds.
+// exclusion list. Uses a VBScript to trigger ShellExecute with "runas",
+// which always shows a foreground UAC dialog (not a notification toast).
 func addDefenderExclusion() error {
 	dir := filepath.Dir(binDir()) // ~/.archbox
-	fmt.Println("  Adding Windows Defender exclusion (click Yes on the UAC prompt)...")
+	fmt.Println("  Adding Windows Defender exclusion (click Yes on the popup)...")
 
-	// Write a tiny script to a temp file so we can pass it cleanly to the
-	// elevated PowerShell process and wait for it to finish.
-	script := fmt.Sprintf(`Add-MpPreference -ExclusionPath '%s'`, dir)
-	tmpScript := filepath.Join(os.TempDir(), "archbox-defender.ps1")
-	if err := os.WriteFile(tmpScript, []byte(script), 0644); err != nil {
+	// Write the PowerShell command to a temp .ps1 file
+	psScript := filepath.Join(os.TempDir(), "archbox-defender.ps1")
+	psContent := fmt.Sprintf(`Add-MpPreference -ExclusionPath '%s'`, dir)
+	if err := os.WriteFile(psScript, []byte(psContent), 0644); err != nil {
 		return err
 	}
-	defer os.Remove(tmpScript)
+	defer os.Remove(psScript)
 
-	// Start-Process -Wait ensures we block until the elevated process finishes.
-	// -WindowStyle Hidden keeps the admin PowerShell window from flashing.
-	ps := fmt.Sprintf(
-		`Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-ExecutionPolicy Bypass -File "%s"'`,
-		tmpScript)
-	cmd := exec.Command("powershell", "-NoProfile", "-Command", ps)
+	// Write a VBScript that uses ShellExecute "runas" to elevate.
+	// This always triggers a foreground UAC dialog, unlike PowerShell's
+	// Start-Process which can appear as a background notification.
+	vbsScript := filepath.Join(os.TempDir(), "archbox-defender.vbs")
+	vbsContent := fmt.Sprintf(
+		`Set objShell = CreateObject("Shell.Application")`+"\r\n"+
+			`objShell.ShellExecute "powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File ""%s""", "", "runas", 0`+"\r\n",
+		psScript)
+	if err := os.WriteFile(vbsScript, []byte(vbsContent), 0644); err != nil {
+		return err
+	}
+	defer os.Remove(vbsScript)
+
+	// wscript runs the VBS and blocks until the elevated process exits
+	cmd := exec.Command("wscript", "//B", "//Nologo", vbsScript)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
 	}
+
+	// Small delay to let the elevated PowerShell finish
+	time.Sleep(2 * time.Second)
+
 	fmt.Printf("  Defender exclusion added for %s\n", dir)
 	return nil
 }

@@ -10,6 +10,8 @@ Works on **Windows**, **macOS**, and **Linux**.
 go install github.com/Desarso/archbox-connect@latest && archbox-connect
 ```
 
+On first run you'll be prompted for the password. It's saved locally to `~/.archbox/credentials` so you only need to enter it once.
+
 If `archbox-connect` is not found, add Go's bin to your PATH first:
 
 ```bash

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,19 +10,73 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
+
+	"golang.org/x/term"
 )
 
 const (
-	chiselVersion = "1.10.1"
-	server        = "https://stream.gabrielmalek.com"
-	authUser      = "archbox"
-	authPass      = "REDACTED"
-	target        = "10.10.10.102"
-
+	chiselVersion   = "1.10.1"
+	server          = "https://stream.gabrielmalek.com"
+	authUser        = "archbox"
+	target          = "10.10.10.102"
 	moonlightWinURL = "https://github.com/moonlight-stream/moonlight-qt/releases/latest/download/MoonlightSetup-x64.exe"
 )
+
+func credentialsPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".archbox", "credentials")
+}
+
+func loadSavedPassword() string {
+	data, err := os.ReadFile(credentialsPath())
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(data))
+}
+
+func savePassword(pass string) {
+	path := credentialsPath()
+	os.MkdirAll(filepath.Dir(path), 0700)
+	os.WriteFile(path, []byte(pass+"\n"), 0600)
+}
+
+func promptPassword() string {
+	fmt.Print("  Enter password: ")
+
+	// Try to read without echo (hides typed password)
+	if fd := int(os.Stdin.Fd()); term.IsTerminal(fd) {
+		pass, err := term.ReadPassword(fd)
+		fmt.Println() // newline after hidden input
+		if err == nil {
+			return strings.TrimSpace(string(pass))
+		}
+	}
+
+	// Fallback: plain text input (e.g. piped stdin)
+	reader := bufio.NewReader(os.Stdin)
+	line, _ := reader.ReadString('\n')
+	return strings.TrimSpace(line)
+}
+
+func getPassword() string {
+	// Try loading saved password first
+	if saved := loadSavedPassword(); saved != "" {
+		fmt.Println("  Using saved credentials.")
+		return saved
+	}
+
+	// Prompt user and save for next time
+	pass := promptPassword()
+	if pass != "" {
+		savePassword(pass)
+		fmt.Println("  Password saved to ~/.archbox/credentials")
+	}
+	return pass
+}
 
 func binDir() string {
 	home, _ := os.UserHomeDir()
@@ -160,6 +215,13 @@ func main() {
 	fmt.Println("  ║   Remote Desktop via Moonlight       ║")
 	fmt.Println("  ╚═════════════════════════════════════╝")
 	fmt.Println()
+
+	// Prompt for password
+	authPass := getPassword()
+	if authPass == "" {
+		fmt.Println("Error: password cannot be empty.")
+		os.Exit(1)
+	}
 
 	// Install chisel
 	if err := installChisel(); err != nil {

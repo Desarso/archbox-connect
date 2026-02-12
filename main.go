@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	chiselVersion = "1.10.1"
+	chiselVersion = "1.11.3"
 	server        = "https://stream.gabrielmalek.com"
 	authUser      = "archbox"
 	target        = "10.10.10.102"

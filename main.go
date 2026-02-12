@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,11 +19,10 @@ import (
 )
 
 const (
-	chiselVersion   = "1.10.1"
-	server          = "https://stream.gabrielmalek.com"
-	authUser        = "archbox"
-	target          = "10.10.10.102"
-	moonlightWinURL = "https://github.com/moonlight-stream/moonlight-qt/releases/latest/download/MoonlightSetup-x64.exe"
+	chiselVersion = "1.10.1"
+	server        = "https://stream.gabrielmalek.com"
+	authUser      = "archbox"
+	target        = "10.10.10.102"
 )
 
 func credentialsPath() string {
@@ -143,9 +143,13 @@ func addWindowsDefenderExclusion() {
 }
 
 func installChisel() error {
-	if _, err := os.Stat(chiselPath()); err == nil {
+	// Check if chisel already exists AND is a reasonable size (>100KB).
+	// A corrupted or quarantined file may exist but be tiny/empty.
+	if info, err := os.Stat(chiselPath()); err == nil && info.Size() > 100*1024 {
 		return nil
 	}
+	// Remove any leftover corrupted file
+	os.Remove(chiselPath())
 	fmt.Println("[1/2] Installing chisel tunnel...")
 
 	// On Windows, whitelist the install directory with Defender first
@@ -206,6 +210,34 @@ func findMoonlight() string {
 	return ""
 }
 
+// moonlightWinInstallerURL queries the GitHub releases API for the latest
+// Moonlight release and returns the download URL for the Windows .exe installer.
+func moonlightWinInstallerURL() (string, error) {
+	resp, err := http.Get("https://api.github.com/repos/moonlight-stream/moonlight-qt/releases/latest")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("GitHub API HTTP %d", resp.StatusCode)
+	}
+	var release struct {
+		Assets []struct {
+			Name string `json:"name"`
+			URL  string `json:"browser_download_url"`
+		} `json:"assets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", err
+	}
+	for _, a := range release.Assets {
+		if strings.HasPrefix(a.Name, "MoonlightSetup") && strings.HasSuffix(a.Name, ".exe") {
+			return a.URL, nil
+		}
+	}
+	return "", fmt.Errorf("no Windows installer found in latest release")
+}
+
 func installMoonlight() bool {
 	if findMoonlight() != "" {
 		return true
@@ -213,8 +245,14 @@ func installMoonlight() bool {
 	fmt.Println("[2/2] Moonlight not found. Installing...")
 	switch runtime.GOOS {
 	case "windows":
+		dlURL, err := moonlightWinInstallerURL()
+		if err != nil {
+			fmt.Printf("  Failed to find installer: %v\n", err)
+			fmt.Println("  Install manually: https://moonlight-stream.org")
+			return false
+		}
 		installer := filepath.Join(os.TempDir(), "MoonlightSetup.exe")
-		if err := downloadFile(moonlightWinURL, installer); err != nil {
+		if err := downloadFile(dlURL, installer); err != nil {
 			fmt.Printf("  Failed: %v\n", err)
 			fmt.Println("  Install manually: https://moonlight-stream.org")
 			return false

@@ -390,19 +390,38 @@ func main() {
 		}
 	}
 
-	// Wait for signal or chisel exit
+	// Wait for signal or chisel exit, auto-reconnect on failure
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	done := make(chan error, 1)
-	go func() { done <- chiselCmd.Wait() }()
 
-	select {
-	case <-sigCh:
-		fmt.Println("\n  Disconnecting...")
-		chiselCmd.Process.Kill()
-	case err := <-done:
-		if err != nil {
-			fmt.Printf("\n  Tunnel lost: %v\n", err)
+	for {
+		done := make(chan error, 1)
+		go func() { done <- chiselCmd.Wait() }()
+
+		select {
+		case <-sigCh:
+			fmt.Println("\n  Disconnecting...")
+			chiselCmd.Process.Kill()
+			return
+		case err := <-done:
+			if err != nil {
+				fmt.Printf("\n  Tunnel lost: %v\n", err)
+				fmt.Println("  Reconnecting in 3 seconds...")
+				time.Sleep(3 * time.Second)
+
+				// Restart chisel
+				chiselCmd = exec.Command(chiselPath(), args...)
+				chiselCmd.Stdout = os.Stdout
+				chiselCmd.Stderr = os.Stderr
+				if err := chiselCmd.Start(); err != nil {
+					fmt.Printf("  Reconnect failed: %v\n", err)
+					return
+				}
+				fmt.Println("  Reconnected!")
+			} else {
+				// Clean exit
+				return
+			}
 		}
 	}
 }

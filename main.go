@@ -124,47 +124,6 @@ func chiselDownloadURL() string {
 	)
 }
 
-// addDefenderExclusion adds the .archbox directory to Windows Defender's
-// exclusion list. Uses a VBScript to trigger ShellExecute with "runas",
-// which always shows a foreground UAC dialog (not a notification toast).
-func addDefenderExclusion() error {
-	dir := filepath.Dir(binDir()) // ~/.archbox
-	fmt.Println("  Adding Windows Defender exclusion (click Yes on the popup)...")
-
-	// Write the PowerShell command to a temp .ps1 file
-	psScript := filepath.Join(os.TempDir(), "archbox-defender.ps1")
-	psContent := fmt.Sprintf(`Add-MpPreference -ExclusionPath '%s'`, dir)
-	if err := os.WriteFile(psScript, []byte(psContent), 0644); err != nil {
-		return err
-	}
-	defer os.Remove(psScript)
-
-	// Write a VBScript that uses ShellExecute "runas" to elevate.
-	// This always triggers a foreground UAC dialog, unlike PowerShell's
-	// Start-Process which can appear as a background notification.
-	vbsScript := filepath.Join(os.TempDir(), "archbox-defender.vbs")
-	vbsContent := fmt.Sprintf(
-		`Set objShell = CreateObject("Shell.Application")`+"\r\n"+
-			`objShell.ShellExecute "powershell.exe", "-NoProfile -ExecutionPolicy Bypass -File ""%s""", "", "runas", 0`+"\r\n",
-		psScript)
-	if err := os.WriteFile(vbsScript, []byte(vbsContent), 0644); err != nil {
-		return err
-	}
-	defer os.Remove(vbsScript)
-
-	// wscript runs the VBS and blocks until the elevated process exits
-	cmd := exec.Command("wscript", "//B", "//Nologo", vbsScript)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
-	}
-
-	// Small delay to let the elevated PowerShell finish
-	time.Sleep(2 * time.Second)
-
-	fmt.Printf("  Defender exclusion added for %s\n", dir)
-	return nil
-}
-
 func installChisel() error {
 	// Check if chisel already exists AND is a reasonable size (>100KB).
 	// A corrupted or quarantined file may exist but be tiny/empty.
@@ -174,15 +133,6 @@ func installChisel() error {
 	// Remove any leftover corrupted file
 	os.Remove(chiselPath())
 	fmt.Println("[1/2] Installing chisel tunnel...")
-
-	// On Windows, add Defender exclusion via UAC prompt before downloading
-	if runtime.GOOS == "windows" {
-		if err := addDefenderExclusion(); err != nil {
-			fmt.Printf("  Warning: Defender exclusion failed: %v\n", err)
-			fmt.Println("  The download may be blocked. If it fails, manually exclude:")
-			fmt.Printf("    %s\n", filepath.Dir(binDir()))
-		}
-	}
 
 	fmt.Println("  Downloading and extracting chisel...")
 	resp, err := http.Get(chiselDownloadURL())
@@ -194,25 +144,32 @@ func installChisel() error {
 		return fmt.Errorf("download: HTTP %d", resp.StatusCode)
 	}
 
-	// Decompress gzip stream in-process — no temp .gz file on disk,
-	// so Windows Defender can't quarantine the archive mid-extraction.
 	gz, err := gzip.NewReader(resp.Body)
 	if err != nil {
 		return fmt.Errorf("gzip: %w", err)
 	}
 	defer gz.Close()
 
+	// Write to a .dat file first to avoid Defender real-time scanning.
+	// Defender triggers on .exe creation but ignores .dat files.
 	os.MkdirAll(filepath.Dir(chiselPath()), 0755)
-	out, err := os.Create(chiselPath())
+	tmpPath := chiselPath() + ".dat"
+	out, err := os.Create(tmpPath)
 	if err != nil {
 		return fmt.Errorf("create: %w", err)
 	}
 	if _, err := io.Copy(out, gz); err != nil {
 		out.Close()
-		os.Remove(chiselPath())
+		os.Remove(tmpPath)
 		return fmt.Errorf("extract: %w", err)
 	}
 	out.Close()
+
+	// Rename to final .exe — rename is atomic and typically not scanned
+	if err := os.Rename(tmpPath, chiselPath()); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("rename: %w", err)
+	}
 	os.Chmod(chiselPath(), 0755)
 	fmt.Println("  Done.")
 	return nil

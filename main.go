@@ -226,6 +226,27 @@ func installChisel() error {
 	return nil
 }
 
+func isMoonlightRunning() bool {
+	switch runtime.GOOS {
+	case "windows":
+		out, err := exec.Command("tasklist", "/FI", "IMAGENAME eq Moonlight.exe", "/NH").Output()
+		if err == nil && strings.Contains(string(out), "Moonlight.exe") {
+			return true
+		}
+	case "darwin":
+		out, err := exec.Command("pgrep", "-f", "Moonlight").Output()
+		if err == nil && len(strings.TrimSpace(string(out))) > 0 {
+			return true
+		}
+	default:
+		out, err := exec.Command("pgrep", "-x", "moonlight").Output()
+		if err == nil && len(strings.TrimSpace(string(out))) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func findMoonlight() string {
 	switch runtime.GOOS {
 	case "windows":
@@ -377,8 +398,8 @@ func main() {
 	fmt.Println("  ════════════════════════════════════════")
 	fmt.Println()
 
-	// Launch Moonlight
-	if hasMoonlight {
+	// Launch Moonlight (only if not already running)
+	if hasMoonlight && !isMoonlightRunning() {
 		ml := findMoonlight()
 		if ml != "" {
 			fmt.Println("  Launching Moonlight...")

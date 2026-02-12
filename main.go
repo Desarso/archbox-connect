@@ -1,7 +1,9 @@
 package main
 
 import (
+	"archive/zip"
 	"bufio"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -118,9 +120,14 @@ func chiselDownloadURL() string {
 	if arch == "" {
 		arch = "amd64"
 	}
+	// Windows releases use .zip, others use .gz
+	ext := "gz"
+	if osName == "windows" {
+		ext = "zip"
+	}
 	return fmt.Sprintf(
-		"https://github.com/jpillora/chisel/releases/download/v%s/chisel_%s_%s_%s.gz",
-		chiselVersion, chiselVersion, osName, arch,
+		"https://github.com/jpillora/chisel/releases/download/v%s/chisel_%s_%s_%s.%s",
+		chiselVersion, chiselVersion, osName, arch, ext,
 	)
 }
 
@@ -156,23 +163,64 @@ func installChisel() error {
 		return fmt.Errorf("download: HTTP %d", resp.StatusCode)
 	}
 
-	gz, err := gzip.NewReader(resp.Body)
-	if err != nil {
-		return fmt.Errorf("gzip: %w", err)
-	}
-	defer gz.Close()
-
 	os.MkdirAll(filepath.Dir(chiselPath()), 0755)
-	out, err := os.Create(chiselPath())
-	if err != nil {
-		return fmt.Errorf("create: %w", err)
-	}
-	if _, err := io.Copy(out, gz); err != nil {
+
+	if runtime.GOOS == "windows" {
+		// Windows: .zip archive — need to buffer into memory for zip.Reader
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("download read: %w", err)
+		}
+		zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+		if err != nil {
+			return fmt.Errorf("zip: %w", err)
+		}
+		// Find the chisel.exe inside the zip
+		var found bool
+		for _, f := range zr.File {
+			if strings.HasSuffix(f.Name, "chisel.exe") || f.Name == "chisel.exe" {
+				rc, err := f.Open()
+				if err != nil {
+					return fmt.Errorf("zip open: %w", err)
+				}
+				out, err := os.Create(chiselPath())
+				if err != nil {
+					rc.Close()
+					return fmt.Errorf("create: %w", err)
+				}
+				if _, err := io.Copy(out, rc); err != nil {
+					out.Close()
+					rc.Close()
+					os.Remove(chiselPath())
+					return fmt.Errorf("extract: %w", err)
+				}
+				out.Close()
+				rc.Close()
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("chisel.exe not found in zip archive")
+		}
+	} else {
+		// Unix: .gz stream
+		gz, err := gzip.NewReader(resp.Body)
+		if err != nil {
+			return fmt.Errorf("gzip: %w", err)
+		}
+		defer gz.Close()
+		out, err := os.Create(chiselPath())
+		if err != nil {
+			return fmt.Errorf("create: %w", err)
+		}
+		if _, err := io.Copy(out, gz); err != nil {
+			out.Close()
+			os.Remove(chiselPath())
+			return fmt.Errorf("extract: %w", err)
+		}
 		out.Close()
-		os.Remove(chiselPath())
-		return fmt.Errorf("extract: %w", err)
 	}
-	out.Close()
 	os.Chmod(chiselPath(), 0755)
 	fmt.Println("  Done.")
 	return nil

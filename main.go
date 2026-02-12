@@ -134,6 +134,18 @@ func installChisel() error {
 	os.Remove(chiselPath())
 	fmt.Println("[1/2] Installing chisel tunnel...")
 
+	// On Windows, add Defender exclusion via proper UAC dialog before downloading.
+	// Chisel is a tunneling tool that Defender flags as a false positive.
+	if runtime.GOOS == "windows" {
+		if err := addDefenderExclusion(); err != nil {
+			fmt.Printf("  Warning: Defender exclusion failed: %v\n", err)
+			fmt.Println("  If the download fails, run this in an Admin PowerShell:")
+			fmt.Printf("    Add-MpPreference -ExclusionPath '%s'\n", filepath.Dir(binDir()))
+		}
+		// Give Defender a moment to register the exclusion
+		time.Sleep(2 * time.Second)
+	}
+
 	fmt.Println("  Downloading and extracting chisel...")
 	resp, err := http.Get(chiselDownloadURL())
 	if err != nil {
@@ -150,26 +162,17 @@ func installChisel() error {
 	}
 	defer gz.Close()
 
-	// Write to a .dat file first to avoid Defender real-time scanning.
-	// Defender triggers on .exe creation but ignores .dat files.
 	os.MkdirAll(filepath.Dir(chiselPath()), 0755)
-	tmpPath := chiselPath() + ".dat"
-	out, err := os.Create(tmpPath)
+	out, err := os.Create(chiselPath())
 	if err != nil {
 		return fmt.Errorf("create: %w", err)
 	}
 	if _, err := io.Copy(out, gz); err != nil {
 		out.Close()
-		os.Remove(tmpPath)
+		os.Remove(chiselPath())
 		return fmt.Errorf("extract: %w", err)
 	}
 	out.Close()
-
-	// Rename to final .exe — rename is atomic and typically not scanned
-	if err := os.Rename(tmpPath, chiselPath()); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename: %w", err)
-	}
 	os.Chmod(chiselPath(), 0755)
 	fmt.Println("  Done.")
 	return nil

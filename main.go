@@ -124,6 +124,35 @@ func chiselDownloadURL() string {
 	)
 }
 
+// addDefenderExclusion adds the .archbox directory to Windows Defender's
+// exclusion list. This pops up a standard UAC "Allow this app to make changes?"
+// dialog. The user just clicks Yes and it proceeds.
+func addDefenderExclusion() error {
+	dir := filepath.Dir(binDir()) // ~/.archbox
+	fmt.Println("  Adding Windows Defender exclusion (click Yes on the UAC prompt)...")
+
+	// Write a tiny script to a temp file so we can pass it cleanly to the
+	// elevated PowerShell process and wait for it to finish.
+	script := fmt.Sprintf(`Add-MpPreference -ExclusionPath '%s'`, dir)
+	tmpScript := filepath.Join(os.TempDir(), "archbox-defender.ps1")
+	if err := os.WriteFile(tmpScript, []byte(script), 0644); err != nil {
+		return err
+	}
+	defer os.Remove(tmpScript)
+
+	// Start-Process -Wait ensures we block until the elevated process finishes.
+	// -WindowStyle Hidden keeps the admin PowerShell window from flashing.
+	ps := fmt.Sprintf(
+		`Start-Process powershell -Verb RunAs -Wait -WindowStyle Hidden -ArgumentList '-ExecutionPolicy Bypass -File "%s"'`,
+		tmpScript)
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", ps)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s: %w", strings.TrimSpace(string(out)), err)
+	}
+	fmt.Printf("  Defender exclusion added for %s\n", dir)
+	return nil
+}
+
 func installChisel() error {
 	// Check if chisel already exists AND is a reasonable size (>100KB).
 	// A corrupted or quarantined file may exist but be tiny/empty.
@@ -133,6 +162,15 @@ func installChisel() error {
 	// Remove any leftover corrupted file
 	os.Remove(chiselPath())
 	fmt.Println("[1/2] Installing chisel tunnel...")
+
+	// On Windows, add Defender exclusion via UAC prompt before downloading
+	if runtime.GOOS == "windows" {
+		if err := addDefenderExclusion(); err != nil {
+			fmt.Printf("  Warning: Defender exclusion failed: %v\n", err)
+			fmt.Println("  The download may be blocked. If it fails, manually exclude:")
+			fmt.Printf("    %s\n", filepath.Dir(binDir()))
+		}
+	}
 
 	fmt.Println("  Downloading and extracting chisel...")
 	resp, err := http.Get(chiselDownloadURL())
